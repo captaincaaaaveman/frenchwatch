@@ -1,14 +1,23 @@
 #include "simple_analog.h"
 #include <math.h>
 #include "pebble.h"
+#define KEY_TEMPERATURE 0
+#define KEY_CONDITIONS 1
 
 static Window *s_window;
 static Layer *s_simple_bg_layer, *s_date_layer, *s_hands_layer;
 static TextLayer *s_day_label, *s_num_label;
 
+static TextLayer *s_stock_layer;
+
+// Store incoming information
+static char temperature_buffer[8];
+static char conditions_buffer[32];
+static char weather_layer_buffer[32];
+
 static GPath *s_tick_paths[NUM_CLOCK_TICKS];
 static GPath *s_minute_arrow, *s_hour_arrow;
-static char s_num_buffer[4], s_day_buffer[6];
+static char s_num_buffer[6], s_day_buffer[7];
 
 static BitmapLayer *s_background_layer;
 static GBitmap *s_background_bitmap;
@@ -64,11 +73,6 @@ static void hands_update_proc(Layer *layer, GContext *ctx) {
   struct tm *t = localtime(&now);
   
   get_decimal_time(t);
-//  int32_t second_angle = TRIG_MAX_ANGLE * t->tm_sec / 60;
-
-  int seconds_through_the_day = ( ( t->tm_hour * 60  * 60 ) + ( t->tm_min * 60 ) + (t->tm_sec) );
-  int seconds_in_the_day = 60*60*24;
-  int metric_seconds = 100*100*20;
   
   int32_t second_angle = TRIG_MAX_ANGLE * ( t->tm_sec / 100.0f) ;
   
@@ -90,7 +94,11 @@ static void hands_update_proc(Layer *layer, GContext *ctx) {
   gpath_draw_filled(ctx, s_minute_arrow);
   gpath_draw_outline(ctx, s_minute_arrow);
 
-  gpath_rotate_to(s_hour_arrow, (TRIG_MAX_ANGLE * (((t->tm_hour % 10) * 5) + (t->tm_min / 10))) / (10 * 5));
+//  printf( "hour: %d", t->tm_hour );
+//  printf( "min: %d", t->tm_min );
+//  printf( "total: %f", (((t->tm_hour % 10) * 100.0f) + t->tm_min) );
+  
+  gpath_rotate_to(s_hour_arrow, (TRIG_MAX_ANGLE * (((t->tm_hour % 10) * 100.0f) + t->tm_min)) / (1000.0f));
   gpath_draw_filled(ctx, s_hour_arrow);
   gpath_draw_outline(ctx, s_hour_arrow);
 
@@ -103,15 +111,30 @@ static void date_update_proc(Layer *layer, GContext *ctx) {
   time_t now = time(NULL);
   struct tm *t = localtime(&now);
 
-  strftime(s_day_buffer, sizeof(s_day_buffer), "%H%M", t);
-  text_layer_set_text(s_day_label, s_day_buffer);
+  strftime(s_day_buffer, sizeof(s_day_buffer), "(%H%M)", t);
+  text_layer_set_text(s_num_label, s_day_buffer);
 
-  strftime(s_num_buffer, sizeof(s_num_buffer), "%d", t);
-  text_layer_set_text(s_num_label, s_num_buffer);
+  get_decimal_time(t);
+  
+  strftime(s_num_buffer, sizeof(s_num_buffer), "%H%M", t);
+  text_layer_set_text(s_day_label, s_num_buffer);
 }
 
 static void handle_second_tick(struct tm *tick_time, TimeUnits units_changed) {
   layer_mark_dirty(window_get_root_layer(s_window));
+
+// Get weather update every 5 minutes
+if(tick_time->tm_min % 5 == 0) {
+  // Begin dictionary
+  DictionaryIterator *iter;
+  app_message_outbox_begin(&iter);
+
+  // Add a key-value pair
+  dict_write_uint8(iter, 0, 0);
+
+  // Send the message!
+  app_message_outbox_send();
+}
 }
 
 static void window_load(Window *window) {
@@ -124,28 +147,8 @@ static void window_load(Window *window) {
 
   s_date_layer = layer_create(bounds);
   layer_set_update_proc(s_date_layer, date_update_proc);
-  layer_add_child(window_layer, s_date_layer);
 
-  s_day_label = text_layer_create(PBL_IF_ROUND_ELSE(
-    GRect(63, 87, 87, 20),
-    GRect(46, 87, 87, 20)));
 
-//   text_layer_set_text(s_day_label, s_day_buffer);
-//   text_layer_set_background_color(s_day_label, GColorWhite);
-//   text_layer_set_text_color(s_day_label, GColorBlack);
-//   text_layer_set_font(s_day_label, fonts_get_system_font(FONT_KEY_GOTHIC_18));
-
-//   layer_add_child(s_date_layer, text_layer_get_layer(s_day_label));
-
-  s_num_label = text_layer_create(PBL_IF_ROUND_ELSE(
-    GRect(0, 4, 8, 0),
-    GRect(3, 4, 8, 0)));
-//  text_layer_set_text(s_num_label, s_num_buffer);
-//   text_layer_set_background_color(s_num_label, GColorBlack);
-//   text_layer_set_text_color(s_num_label, GColorWhite);
-//   text_layer_set_font(s_num_label, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
-
-//   layer_add_child(s_date_layer, text_layer_get_layer(s_num_label));
 
   // Create GBitmap
   s_background_bitmap = gbitmap_create_with_resource(RESOURCE_ID_BACKGROUND_CLOCKFACE);
@@ -156,26 +159,32 @@ static void window_load(Window *window) {
   // Set the bitmap onto the layer and add to the window
   bitmap_layer_set_bitmap(s_background_layer, s_background_bitmap);
   layer_add_child(window_layer, bitmap_layer_get_layer(s_background_layer));
-
-
-
-
-
-
-
-  s_date_layer = layer_create(bounds);
-  layer_set_update_proc(s_date_layer, date_update_proc);
   layer_add_child(window_layer, s_date_layer);
 
+  
+  // Create temperature Layer
+s_stock_layer = text_layer_create(
+    GRect(0, PBL_IF_ROUND_ELSE(35, 35), bounds.size.w, 25));
+
+// Style the text
+text_layer_set_background_color(s_stock_layer, GColorClear);
+text_layer_set_text_color(s_stock_layer, GColorWhite);
+text_layer_set_font(s_stock_layer, fonts_get_system_font(FONT_KEY_GOTHIC_24));
+text_layer_set_text_alignment(s_stock_layer, GTextAlignmentCenter);
+text_layer_set_text(s_stock_layer, "Loading...");
+
+layer_add_child(window_layer, text_layer_get_layer(s_stock_layer));
+  
+  
   s_day_label = text_layer_create(PBL_IF_ROUND_ELSE(
-    GRect(63, 114, 67, 20),
-    GRect(46, 114, 67, 20)));
+    GRect(53, 114, 67, 20),
+    GRect(36, 114, 67, 20)));
 
 //  text_layer_set_text(s_day_label, s_day_buffer);
   text_layer_set_background_color(s_day_label, GColorBlack);
   text_layer_set_text_color(s_day_label, GColorWhite);
   text_layer_set_font(s_day_label, fonts_get_system_font(FONT_KEY_GOTHIC_18));
-  layer_add_child(window_layer, text_layer_get_layer(s_day_label) );
+  layer_add_child(s_date_layer, text_layer_get_layer(s_day_label) );
 
   s_hands_layer = layer_create(bounds);
   layer_set_update_proc(s_hands_layer, hands_update_proc);
@@ -183,15 +192,15 @@ static void window_load(Window *window) {
 
 //   layer_add_child(s_date_layer, text_layer_get_layer(s_day_label));
 
-//   s_num_label = text_layer_create(PBL_IF_ROUND_ELSE(
-//     GRect(90, 114, 18, 20),
-//     GRect(73, 114, 18, 20)));
-//   text_layer_set_text(s_num_label, s_num_buffer);
-//   text_layer_set_background_color(s_num_label, GColorBlack);
-//   text_layer_set_text_color(s_num_label, GColorWhite);
-//   text_layer_set_font(s_num_label, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
+   s_num_label = text_layer_create(PBL_IF_ROUND_ELSE(
+     GRect(90, 114, 45, 20),
+     GRect(73, 114, 45, 20)));
+  text_layer_set_text(s_num_label, s_num_buffer);
+  text_layer_set_background_color(s_num_label, GColorBlack);
+  text_layer_set_text_color(s_num_label, GColorWhite);
+  text_layer_set_font(s_num_label, fonts_get_system_font(FONT_KEY_GOTHIC_18_BOLD));
 
-//   layer_add_child(s_date_layer, text_layer_get_layer(s_num_label));
+  layer_add_child(s_date_layer, text_layer_get_layer(s_num_label));
 
 
 }
@@ -202,6 +211,7 @@ static void window_unload(Window *window) {
 
   text_layer_destroy(s_day_label);
   text_layer_destroy(s_num_label);
+  text_layer_destroy(s_stock_layer);
 
   layer_destroy(s_hands_layer);
   
@@ -212,6 +222,39 @@ static void window_unload(Window *window) {
   bitmap_layer_destroy(s_background_layer);
 
 }
+
+static void inbox_received_callback(DictionaryIterator *iterator, void *context) {
+  
+  // Read tuples for data
+Tuple *temp_tuple = dict_find(iterator, KEY_TEMPERATURE);
+Tuple *conditions_tuple = dict_find(iterator, KEY_CONDITIONS);
+
+// If all data is available, use it
+if(temp_tuple && conditions_tuple) {
+  snprintf(temperature_buffer, sizeof(temperature_buffer), "%s", temp_tuple->value->cstring);
+  snprintf(conditions_buffer, sizeof(conditions_buffer), "%s", conditions_tuple->value->cstring);
+  
+  // Assemble full string and display
+  snprintf(weather_layer_buffer, sizeof(weather_layer_buffer), "%s, %s", temperature_buffer, conditions_buffer);
+  text_layer_set_text(s_stock_layer, weather_layer_buffer);
+//   text_layer_set_text(s_stock_layer, conditions_buffer);
+}
+
+
+}
+static void inbox_dropped_callback(AppMessageResult reason, void *context) {
+  APP_LOG(APP_LOG_LEVEL_ERROR, "Message dropped!");
+}
+
+static void outbox_failed_callback(DictionaryIterator *iterator, AppMessageResult reason, void *context) {
+  APP_LOG(APP_LOG_LEVEL_ERROR, "Outbox send failed!");
+}
+
+static void outbox_sent_callback(DictionaryIterator *iterator, void *context) {
+  APP_LOG(APP_LOG_LEVEL_INFO, "Outbox send success!");
+}
+
+
 
 static void init() {
   s_window = window_create();
@@ -239,6 +282,18 @@ static void init() {
   }
 
   tick_timer_service_subscribe(SECOND_UNIT, handle_second_tick);
+
+  // Register callbacks
+  app_message_register_inbox_received(inbox_received_callback);
+  
+  // Open AppMessage
+  const int inbox_size = 128;
+  const int outbox_size = 128;
+  app_message_open(inbox_size, outbox_size);
+
+  app_message_register_inbox_dropped(inbox_dropped_callback);
+  app_message_register_outbox_failed(outbox_failed_callback);
+  app_message_register_outbox_sent(outbox_sent_callback);
 }
 
 
